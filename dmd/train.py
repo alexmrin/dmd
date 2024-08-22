@@ -69,6 +69,7 @@ def train(
     optimizer_d: torch.optim.Optimizer,
     device: torch.device,
     epochs: int,
+    accelerator: Accelerator,
     max_norm: float = 10,
     amp_autocast=None,
     neptune_run: Optional[Run] = None,
@@ -101,11 +102,11 @@ def train(
             device,
             epoch,
             max_norm=max_norm,
-            amp_autocast=amp_autocast,
             neptune_run=neptune_run,
             output_dir=checkpoint_handler.checkpoint_dir,
             print_freq=print_freq,
             im_save_freq=im_save_freq,
+            accelerator=accelerator
         )
 
         # lr_scheduler.step(epoch)
@@ -143,7 +144,7 @@ def run(
     output_dir: str = None,
     batch_size: int = 56,
     eval_batch_size: int = 128,
-    num_workers: int = 10,
+    num_workers: int = 1,
     lr: float = 5e-5,
     weight_decay: float = 0.01,
     betas: Tuple[float, float] = (0.9, 0.999),
@@ -159,6 +160,12 @@ def run(
     model_save_steps: int = 1600,
     seed: int = 42,
 ) -> None:
+    if not resume_from_checkpoint and output_dir is None:
+        raise ValueError("`output_dir` must be given when `resume_from_checkpoint` is `False`.")
+    if resume_from_checkpoint and output_dir is None:
+        warnings.warn("`output_dir` is set to `model_path` when `resume_from_checkpoint` is `True`.")
+        output_dir = Path(model_path).parent
+    output_dir = Path(output_dir)
     # Initialize accelerator
     accelerator = Accelerator()
     device = accelerator.device
@@ -170,10 +177,15 @@ def run(
     data_path = Path(data_path).resolve()
     training_dataset = CIFARPairs(data_path)
     train_loader = DataLoader(training_dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers)
-
-    test_dataset = CIFAR10(
-        root=(PROJECT_ROOT / "data").as_posix(), train=False, download=True, transform=transforms.ToTensor()
-    )
+    if accelerator.is_main_process:
+        test_dataset = CIFAR10(
+            root=(PROJECT_ROOT / "data").as_posix(), train=True, download=True, transform=transforms.ToTensor()
+        )
+    accelerator.wait_for_everyone()
+    if not accelerator.is_main_process:
+        test_dataset = CIFAR10(
+            root=(PROJECT_ROOT / "data").as_posix(), train=True, download=False, transform=transforms.ToTensor()
+        )
     test_loader = DataLoader(test_dataset, batch_size=eval_batch_size, shuffle=False, num_workers=num_workers)
 
     optimizer_kwargs = {"lr": lr, "weight_decay": weight_decay, "betas": betas}

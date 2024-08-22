@@ -15,6 +15,7 @@ from neptune import Run
 from torch.nn.modules.loss import _Loss as TorchLoss
 from torch.nn.utils import clip_grad_norm_
 from torch.utils.data import DataLoader
+from accelerate import Accelerator
 
 from dmd.modeling_utils import encode_labels, forward_diffusion, get_fixed_generator_sigma
 from dmd.utils.array import torch_to_pillow
