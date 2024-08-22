@@ -205,39 +205,53 @@ def run(
         mu_fake = load_edm(model_path=model_path, device=device)
         generator = load_edm(model_path=model_path, device=device)
 
-        # Create optimizers
+    # Create optimizers
+    params_to_optimize = []
+    conv_params = []
+
+    if disable_gen_convs:
+        for name, param in generator.named_parameters():
+            if 'conv' in name:
+                conv_params.append(param)
+                param.requires_grad = False
+            else:
+                params_to_optimize.append(param)
+        
+        generator_optimizer = AdamW(params=params_to_optimize, **optimizer_kwargs)
+        
+        if accelerator.is_main_process:
+            total_frozen_params_gen = sum(p.numel() for p in conv_params)
+            total_optimized_params_gen = sum(p.numel() for p in params_to_optimize)
+            total_trainable_params_gen = total_frozen_params_gen + total_optimized_params_gen
+
+            print("Generator Statistics:")
+            print(f"{total_frozen_params_gen:,}/{total_trainable_params_gen:,} parameters frozen ({total_frozen_params_gen / total_trainable_params_gen * 100:.2f}%)")
+            print("-" * 50)
+    else:
+        generator_optimizer = AdamW(params=generator.parameters(), **optimizer_kwargs)
+
+    if disable_diff_convs:
         params_to_optimize = []
         conv_params = []
-        if disable_gen_convs:
-            for name, param in generator.named_parameters():
-                if 'conv' in name:
-                    conv_params.append(param)
-                    param.requires_grad = False
-                else:
-                    params_to_optimize.append(param)
-            generator_optimizer = AdamW(params=params_to_optimize, **optimizer_kwargs)
-            if accelerator.is_main_process:
-                print("Generator Statistics:")
-                print(f"{len(conv_params):,}/{len(conv_params) + len(params_to_optimize):,} parameters frozen ({len(conv_params)/len(conv_params) + len(params_to_optimize)*100}%)")
-                print("-" * 50)
-        else:
-            generator_optimizer = AdamW(params=generator.parameters(), **optimizer_kwargs)
-        if disable_diff_convs:
-            for name, param in mu_fake.named_parameters():
-                params_to_optimize = []
-                conv_params = []
-                if 'conv' in name:
-                    conv_params.append(param)
-                    param.requires_grad = False
-                else:
-                    params_to_optimize.append(param)
-            diffuser_optimizer = AdamW(params=params_to_optimize, **optimizer_kwargs)
-            if accelerator.is_main_process:
-                print("diffuser Statistics:")
-                print(f"{len(conv_params):,}/{len(conv_params) + len(params_to_optimize):,} parameters frozen ({len(conv_params)/len(conv_params) + len(params_to_optimize)*100}%)")
-                print("-" * 50)
-        else:
-            diffuser_optimizer = AdamW(params=mu_fake.parameters(), **optimizer_kwargs)
+        for name, param in mu_fake.named_parameters():
+            if 'conv' in name:
+                conv_params.append(param)
+                param.requires_grad = False
+            else:
+                params_to_optimize.append(param)
+        
+        diffuser_optimizer = AdamW(params=params_to_optimize, **optimizer_kwargs)
+        
+        if accelerator.is_main_process:
+            total_frozen_params_diff = sum(p.numel() for p in conv_params)
+            total_optimized_params_diff = sum(p.numel() for p in params_to_optimize)
+            total_trainable_params_diff = total_frozen_params_diff + total_optimized_params_diff
+
+            print("Diffuser Statistics:")
+            print(f"{total_frozen_params_diff:,}/{total_trainable_params_diff:,} parameters frozen ({total_frozen_params_diff / total_trainable_params_diff * 100:.2f}%)")
+            print("-" * 50)
+    else:
+        diffuser_optimizer = AdamW(params=mu_fake.parameters(), **optimizer_kwargs)
 
     # Create losses
     generator_loss = GeneratorLoss(timesteps=dmd_loss_timesteps, lambda_reg=dmd_loss_lambda)
