@@ -61,14 +61,17 @@ class GeneratorLoss(_Loss):
     ) -> torch.Tensor:
         loss_kl = self.dmd_loss(mu_real, mu_fake, x, class_ids)
 
-        # Apply preprocessing
-        x_ref = (x_ref + 1) / 2.0
-        y_ref = (y_ref + 1) / 2.0
-        transform = Resize(224)
-        x_ref = transform(x_ref)
-        y_ref = transform(y_ref)
-        loss_reg = self.lpips(x_ref, y_ref)
-        return loss_kl + self.lambda_reg * loss_reg
+        if x_ref and y_ref is not None:
+            # Apply preprocessing
+            x_ref = (x_ref + 1) / 2.0
+            y_ref = (y_ref + 1) / 2.0
+            transform = Resize(224)
+            x_ref = transform(x_ref)
+            y_ref = transform(y_ref)
+            loss_reg = self.lpips(x_ref, y_ref)
+            return loss_kl + self.lambda_reg * loss_reg
+        else:
+            return loss_kl
 
 
 class DenoisingLoss(_Loss):

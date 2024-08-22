@@ -68,6 +68,8 @@ def train_one_epoch(
     print_freq: int = 10,
     im_save_freq: int = 300,
     accelerator: Accelerator = None,
+    ttur: int = 1,
+    disable_regression: bool = False,
 ):
     output_dir = Path(output_dir)
     images_dir = output_dir / "images"
@@ -82,7 +84,7 @@ def train_one_epoch(
     header = "Epoch: [{}]".format(epoch)
 
     i = 0
-    for pairs in metric_logger.log_every(data_loader_train, print_freq, header):
+    for i, pairs in enumerate(metric_logger.log_every(data_loader_train, print_freq, header)):
         y_ref = pairs["image"].to(device, non_blocking=True).to(torch.float32).clip(-1, 1)
         z_ref = pairs["latent"].to(device, non_blocking=True).to(torch.float32)
         z = torch.randn_like(y_ref, device=device)
@@ -91,24 +93,28 @@ def train_one_epoch(
         z_ref = z_ref * generator_sigma[0, 0]
         class_idx = pairs["class_id"].to(device, non_blocking=True)
         class_ids = encode_labels(class_idx, generator.label_dim)
+        x = generator(z, generator_sigma, class_labels=class_ids)
 
         # Update generator
-        x = generator(z, generator_sigma, class_labels=class_ids)
-        x_ref = generator(z_ref, generator_sigma, class_labels=class_ids)
-        l_g = loss_g(mu_real, mu_fake, x, x_ref, y_ref, class_ids)
-        if not math.isfinite(l_g.item()):
-            print(f"Generator Loss is {l_g.item()}, stopping training")
-            sys.exit(1)
+        if i % ttur == 0:
+            if disable_regression:
+                l_g = loss_g(mu_real, mu_fake, x, class_ids=class_ids)
+            else:
+                x_ref = generator(z_ref, generator_sigma, class_labels=class_ids)
+                l_g = loss_g(mu_real, mu_fake, x, x_ref, y_ref, class_ids)
+            if not math.isfinite(l_g.item()):
+                print(f"Generator Loss is {l_g.item()}, stopping training")
+                sys.exit(1)
 
-        accelerator.backward(l_g)
-        if max_norm is not None:
-            accelerator.clip_grad_norm_(generator.parameters(), max_norm)
-        optimizer_g.step()
-        optimizer_g.zero_grad()
+            accelerator.backward(l_g)
+            if max_norm is not None:
+                accelerator.clip_grad_norm_(generator.parameters(), max_norm)
+            optimizer_g.step()
+            optimizer_g.zero_grad()
 
-        accelerator.wait_for_everyone()
-        if accelerator.is_main_process:
-            metric_logger.log_neptune("loss_g", l_g.item())
+            accelerator.wait_for_everyone()
+            if accelerator.is_main_process:
+                metric_logger.log_neptune("loss_g", l_g.item())
 
         # Update mu_fake
         t = torch.randint(1, 1000, [x.shape[0]])
@@ -143,8 +149,4 @@ def train_one_epoch(
             metric_logger.update(loss_g=l_g.item(), loss_d=l_d.item())
         i += 1
 
-    # gather the stats from all processes
-    metric_logger.synchronize_between_processes()
-    if accelerator.is_main_process:
-        print("Averaged stats:", metric_logger)
     return {k: meter.global_avg for k, meter in metric_logger.meters.items()}

@@ -78,6 +78,8 @@ def train(
     print_freq: int = 10,
     im_save_freq: int = 300,
     checkpoint_handler: Optional[CheckpointHandler] = None,
+    ttur: int = 1,
+    disable_regression: bool = False,
 ):
     print(f"Start training for {epochs} epochs")
     start_time = time.time()
@@ -106,13 +108,17 @@ def train(
             output_dir=checkpoint_handler.checkpoint_dir,
             print_freq=print_freq,
             im_save_freq=im_save_freq,
-            accelerator=accelerator
+            accelerator=accelerator,
+            ttur=ttur,
+            disable_regression=disable_regression
         )
 
         # lr_scheduler.step(epoch)
+        unwrapped_generator = generator.module if hasattr(generator, 'module') else generator
+        unwrapped_mu_fake = mu_fake.module if hasattr(mu_fake, 'module') else mu_fake
         model_dict = {
-            "model_g": generator.state_dict(),
-            "optimizer_g": optimizer_g.state_dict(),
+            "model_g": unwrapped_generator.state_dict(),
+            "optimizer_g": unwrapped_mu_fake.state_dict(),
             "model_d": mu_fake.state_dict(),
             "optimizer_d": optimizer_d.state_dict(),
             # "lr_scheduler": lr_scheduler.state_dict(),
@@ -136,6 +142,10 @@ def train(
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))
     print("Training time {}".format(total_time_str))
 
+def print_frozen_params(model):
+    total_params = sum(p.numel() for p in model.parameters())
+    frozen_params = sum(p.numel() for p in model.parameters() if not p.requires_grad)
+    print(f"{frozen_params:,}/{total_params:,} parameters frozen")
 
 def run(
     model_path: str,
@@ -159,6 +169,10 @@ def run(
     im_save_steps: int = 300,
     model_save_steps: int = 1600,
     seed: int = 42,
+    disable_gen_convs: bool = False,
+    disable_diff_convs: bool = False,
+    ttur: int = 1,
+    disable_regression: bool = False,
 ) -> None:
     if not resume_from_checkpoint and output_dir is None:
         raise ValueError("`output_dir` must be given when `resume_from_checkpoint` is `False`.")
@@ -197,8 +211,38 @@ def run(
         generator = load_edm(model_path=model_path, device=device)
 
         # Create optimizers
-        generator_optimizer = AdamW(params=generator.parameters(), **optimizer_kwargs)
-        diffuser_optimizer = AdamW(params=mu_fake.parameters(), **optimizer_kwargs)
+        if disable_gen_convs:
+            params_to_optimize = []
+            conv_params = []
+            for name, param in generator.named_parameters():
+                if 'conv' in name:
+                    conv_params.append(param)
+                    param.requires_grad = False
+                else:
+                    params_to_optimize.append(param)
+            generator_optimizer = AdamW(params=params_to_optimize, **optimizer_kwargs)
+        else:
+            generator_optimizer = AdamW(params=generator.parameters(), **optimizer_kwargs)
+        if accelerator.is_main_process:
+            print("Generator Statistics:")
+            print_frozen_params(generator)
+            print("-" * 50)
+        if disable_diff_convs:
+            params_to_optimize = []
+            conv_params = []
+            for name, param in mu_fake.named_parameters():
+                if 'conv' in name:
+                    conv_params.append(param)
+                    param.requires_grad = False
+                else:
+                    params_to_optimize.append(param)
+            diffuser_optimizer = AdamW(params=params_to_optimize, **optimizer_kwargs)
+        else:
+            diffuser_optimizer = AdamW(params=mu_fake.parameters(), **optimizer_kwargs)
+        if accelerator.is_main_process:
+            print("diffuser Statistics:")
+            print_frozen_params(mu_fake)
+            print("-" * 50)
 
     # Create losses
     generator_loss = GeneratorLoss(timesteps=dmd_loss_timesteps, lambda_reg=dmd_loss_lambda)
@@ -255,6 +299,8 @@ def run(
         im_save_freq=im_save_steps,
         checkpoint_handler=checkpoint_handler,
         accelerator=accelerator,
+        ttur=ttur,
+        disable_regression=disable_regression,
     )
 
     if neptune_run and accelerator.is_main_process:
