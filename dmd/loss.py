@@ -55,8 +55,8 @@ class GeneratorLoss(_Loss):
         mu_real: Module,
         mu_fake: Module,
         x: torch.Tensor,
-        x_ref: torch.Tensor,
-        y_ref: torch.Tensor,
+        x_ref: torch.Tensor = None,
+        y_ref: torch.Tensor = None,
         class_ids: torch.Tensor = None,
     ) -> torch.Tensor:
         loss_kl = self.dmd_loss(mu_real, mu_fake, x, class_ids)

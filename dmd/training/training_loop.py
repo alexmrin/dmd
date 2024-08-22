@@ -140,9 +140,14 @@ def train_one_epoch(
                 x_t, sigma_t = forward_diffusion(x, t)
                 real_pred = mu_real(x_t, sigma_t, class_labels=class_ids)
                 fake_pred = mu_fake(x_t, sigma_t, class_labels=class_ids)
-            grid = _save_intermediate_images(
-                images_epoch_dir, [x, real_pred, fake_pred, x_ref, y_ref], f"iter_{i}"
-            )
+            if disable_regression:
+                grid = _save_intermediate_images(
+                    images_epoch_dir, [x, real_pred, fake_pred], f"iter_{i}"
+                )
+            else:
+                grid = _save_intermediate_images(
+                    images_epoch_dir, [x, real_pred, fake_pred, x_ref, y_ref], f"iter_{i}"
+                )
             metric_logger.log_neptune(f"images", grid)
 
         if accelerator.is_main_process:

@@ -142,11 +142,6 @@ def train(
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))
     print("Training time {}".format(total_time_str))
 
-def print_frozen_params(model):
-    total_params = sum(p.numel() for p in model.parameters())
-    frozen_params = sum(p.numel() for p in model.parameters() if not p.requires_grad)
-    print(f"{frozen_params:,}/{total_params:,} parameters frozen")
-
 def run(
     model_path: str,
     data_path: str,
@@ -211,9 +206,9 @@ def run(
         generator = load_edm(model_path=model_path, device=device)
 
         # Create optimizers
+        params_to_optimize = []
+        conv_params = []
         if disable_gen_convs:
-            params_to_optimize = []
-            conv_params = []
             for name, param in generator.named_parameters():
                 if 'conv' in name:
                     conv_params.append(param)
@@ -221,28 +216,28 @@ def run(
                 else:
                     params_to_optimize.append(param)
             generator_optimizer = AdamW(params=params_to_optimize, **optimizer_kwargs)
+            if accelerator.is_main_process:
+                print("Generator Statistics:")
+                print(f"{len(conv_params):,}/{len(conv_params) + len(params_to_optimize):,} parameters frozen ({len(conv_params)/len(conv_params) + len(params_to_optimize)*100}%)")
+                print("-" * 50)
         else:
             generator_optimizer = AdamW(params=generator.parameters(), **optimizer_kwargs)
-        if accelerator.is_main_process:
-            print("Generator Statistics:")
-            print_frozen_params(generator)
-            print("-" * 50)
         if disable_diff_convs:
-            params_to_optimize = []
-            conv_params = []
             for name, param in mu_fake.named_parameters():
+                params_to_optimize = []
+                conv_params = []
                 if 'conv' in name:
                     conv_params.append(param)
                     param.requires_grad = False
                 else:
                     params_to_optimize.append(param)
             diffuser_optimizer = AdamW(params=params_to_optimize, **optimizer_kwargs)
+            if accelerator.is_main_process:
+                print("diffuser Statistics:")
+                print(f"{len(conv_params):,}/{len(conv_params) + len(params_to_optimize):,} parameters frozen ({len(conv_params)/len(conv_params) + len(params_to_optimize)*100}%)")
+                print("-" * 50)
         else:
             diffuser_optimizer = AdamW(params=mu_fake.parameters(), **optimizer_kwargs)
-        if accelerator.is_main_process:
-            print("diffuser Statistics:")
-            print_frozen_params(mu_fake)
-            print("-" * 50)
 
     # Create losses
     generator_loss = GeneratorLoss(timesteps=dmd_loss_timesteps, lambda_reg=dmd_loss_lambda)
