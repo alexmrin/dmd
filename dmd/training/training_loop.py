@@ -63,12 +63,11 @@ def train_one_epoch(
     *,
     output_dir: str = None,
     max_norm: float = 10,
-    amp_autocast=None,
     neptune_run: Optional[Run] = None,
     print_freq: int = 10,
     im_save_freq: int = 300,
+    accelerator: Accelerator = None,
 ):
-    amp_autocast = amp_autocast or suppress
     output_dir = Path(output_dir)
     images_dir = output_dir / "images"
     images_dir.mkdir(parents=True, exist_ok=True)
@@ -79,7 +78,6 @@ def train_one_epoch(
     mu_real.requires_grad_(False).eval()
 
     metric_logger = MetricLogger(delimiter="  ", neptune_run=neptune_run)
-    # metric_logger.add_meter("lr", SmoothedValue(window_size=1, fmt="{value:.6f}"))
     header = "Epoch: [{}]".format(epoch)
 
     i = 0
@@ -88,39 +86,47 @@ def train_one_epoch(
         z_ref = pairs["latent"].to(device, non_blocking=True).to(torch.float32)
         z = torch.randn_like(y_ref, device=device)
         generator_sigma = get_fixed_generator_sigma(z.shape[0], device=device)
-        # Scale Z ~ N(0,1) (z and z_ref) w/ sigma(T-1) to match the sigma at T-1
-        z = z * generator_sigma[0, 0]  # scalar product
+        z = z * generator_sigma[0, 0]
         z_ref = z_ref * generator_sigma[0, 0]
         class_idx = pairs["class_id"].to(device, non_blocking=True)
         class_ids = encode_labels(class_idx, generator.label_dim)
 
-        with amp_autocast():
-            # Update generator
-            # tanh after small experiment between (no-postprocess, tanh, clipping)
-            x = generator(z, generator_sigma, class_labels=class_ids)
-            x_ref = generator(z_ref, generator_sigma, class_labels=class_ids)
-            l_g = loss_g(mu_real, mu_fake, x, x_ref, y_ref, class_ids)
-            if not math.isfinite(l_g.item()):
-                print(f"Generator Loss is {l_g.item()}, stopping training")
-                sys.exit(1)
+        # Update generator
+        x = generator(z, generator_sigma, class_labels=class_ids)
+        x_ref = generator(z_ref, generator_sigma, class_labels=class_ids)
+        l_g = loss_g(mu_real, mu_fake, x, x_ref, y_ref, class_ids)
+        if not math.isfinite(l_g.item()):
+            print(f"Generator Loss is {l_g.item()}, stopping training")
+            sys.exit(1)
 
-        update_parameters(generator, l_g, optimizer_g, max_norm)
-        torch.cuda.synchronize()
-        metric_logger.log_neptune("loss_g", l_g.item())
+        accelerator.backward(l_g)
+        if max_norm is not None:
+            accelerator.clip_grad_norm_(generator.parameters(), max_norm)
+        optimizer_g.step()
+        optimizer_g.zero_grad()
 
-        with amp_autocast():
-            # Update mu_fake
-            t = torch.randint(1, 1000, [x.shape[0]])  # t ~ DU(1,1000) as t=0 leads 1/0^2 -> inf
-            l_d = loss_d(mu_fake, x, t, class_ids)
-            if not math.isfinite(l_d.item()):
-                print(f"Diffusion Loss is {l_d.item()}, stopping training")
-                sys.exit(1)
+        accelerator.wait_for_everyone()
+        if accelerator.is_main_process:
+            metric_logger.log_neptune("loss_g", l_g.item())
 
-        update_parameters(mu_fake, l_d, optimizer_d, max_norm)
-        torch.cuda.synchronize()
-        metric_logger.log_neptune("loss_d", l_d.item())
+        # Update mu_fake
+        t = torch.randint(1, 1000, [x.shape[0]])
+        l_d = loss_d(mu_fake, x, t, class_ids)
+        if not math.isfinite(l_d.item()):
+            print(f"Diffusion Loss is {l_d.item()}, stopping training")
+            sys.exit(1)
 
-        if i % im_save_freq == 0:
+        accelerator.backward(l_d)
+        if max_norm is not None:
+            accelerator.clip_grad_norm_(mu_fake.parameters(), max_norm)
+        optimizer_d.step()
+        optimizer_d.zero_grad()
+
+        accelerator.wait_for_everyone()
+        if accelerator.is_main_process:
+            metric_logger.log_neptune("loss_d", l_d.item())
+
+        if i % im_save_freq == 0 and accelerator.is_main_process:
             images_epoch_dir = images_dir / f"epoch_{epoch}"
             images_epoch_dir.mkdir(exist_ok=True)
             with torch.no_grad():
@@ -132,13 +138,12 @@ def train_one_epoch(
             )
             metric_logger.log_neptune(f"images", grid)
 
-        # if model_ema is not None:
-        #     model_ema.update(model)
-
-        metric_logger.update(loss_g=l_g.item(), loss_d=l_d.item())
-        # metric_logger.update(lr=optimizer.param_groups[0]["lr"])
+        if accelerator.is_main_process:
+            metric_logger.update(loss_g=l_g.item(), loss_d=l_d.item())
         i += 1
+
     # gather the stats from all processes
     metric_logger.synchronize_between_processes()
-    print("Averaged stats:", metric_logger)
+    if accelerator.is_main_process:
+        print("Averaged stats:", metric_logger)
     return {k: meter.global_avg for k, meter in metric_logger.meters.items()}

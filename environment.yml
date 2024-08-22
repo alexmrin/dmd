@@ -30,3 +30,4 @@ dependencies:
     - neptune
     - notebook
     - pyspng
+    - accelerate

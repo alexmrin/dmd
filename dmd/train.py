@@ -19,6 +19,8 @@ from torch.nn.modules.loss import _Loss as TorchLoss
 from torch.optim import AdamW
 from torch.utils.data import DataLoader
 from torchvision.datasets import CIFAR10
+from accelerate import Accelerator
+from accelerate.utils import set_seed
 
 from dmd import NEPTUNE_CONFIG_PATH, PROJECT_ROOT
 from dmd.dataset.cifar_pairs import CIFARPairs
@@ -147,54 +149,23 @@ def run(
     betas: Tuple[float, float] = (0.9, 0.999),
     dmd_loss_timesteps: int = 1000,
     dmd_loss_lambda: float = 0.25,
-    device: str = None,
     log_neptune: bool = False,
     neptune_run_id: Optional[str] = None,
     resume_from_checkpoint: bool = False,
     cudnn_benchmark: bool = True,
-    amp_autocast: Optional = None,
     max_norm: float = 10.0,
     print_steps: int = 10,
     im_save_steps: int = 300,
     model_save_steps: int = 1600,
     seed: int = 42,
 ) -> None:
-    """
-    Starts the training phase.
+    # Initialize accelerator
+    accelerator = Accelerator()
+    device = accelerator.device
 
-    Args:
-        model_path (str): Path to the model.
-        data_path (str): Path of the h5 dataset file.
-        epochs (int): Number of epochs to train.
-        output_dir (str): Path to the output directory to save the model.
-        batch_size (int): Batch size used in training process. [default: 56]
-        eval_batch_size (int): Batch size used in evaluation process. [default: 128]
-        num_workers (int): Number of workers for data loader. [default: 10]
-        lr (float): Learning rate. [default: 5e-5]
-        weight_decay (float): Weight decay for optimizer. [default: 0.01]
-        betas (tuple(float, float)): Beta parameters for the optimizer. [default: (0.9, 0.999)]
-        dmd_loss_timesteps (int): Number of timesteps to use for DMD loss. [default: 1000]
-        dmd_loss_lambda (float): Lambda for the DMD loss. [default: 0.25]
-        device (Optional(str)): Device to run the models on. [default: None]
-        log_neptune (bool): Whether to log metrics to neptune. [default: False]
-        neptune_run_id (Optional(str)): Neptune run id. [default: None]
-        resume_from_checkpoint (bool): Whether to resume from a checkpoint. [default: False]
-        cudnn_benchmark (bool): Whether to use CUDNN benchmark. [default: True]
-        amp_autocast (Optional): Whether to use AMP autocast. [default: None]
-        max_norm (Optional[float]): Maximum norm of the gradients. [default: 10.0]
-        print_steps (int): Print frequency for metric report. [default: 10]
-        im_save_steps (int): Frequency to save image grids. [default: 300]
-        model_save_steps (int): Frequency to save the model checkpoint. [default: 1600]
-        seed (Optional[int]): Random seed to seed all. [default: 42]
-    """
-    # sanity check
-    if not resume_from_checkpoint and output_dir is None:
-        raise ValueError("`output_dir` must be given when `resume_from_checkpoint` is `False`.")
-    if resume_from_checkpoint and output_dir is None:
-        warnings.warn("`output_dir` is set to `model_path` when `resume_from_checkpoint` is `True`.")
-        output_dir = Path(model_path).parent
-    output_dir = Path(output_dir)
-    seed_everything(seed)
+    # Use accelerator's set_seed instead
+    set_seed(seed)
+
     # Prepare dataloader
     data_path = Path(data_path).resolve()
     training_dataset = CIFARPairs(data_path)
@@ -205,9 +176,6 @@ def run(
     )
     test_loader = DataLoader(test_dataset, batch_size=eval_batch_size, shuffle=False, num_workers=num_workers)
 
-    if device is None:
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-    device = torch.device(device)
     optimizer_kwargs = {"lr": lr, "weight_decay": weight_decay, "betas": betas}
     mu_real = load_edm(model_path="https://nvlabs-fi-cdn.nvidia.com/edm/pretrained/edm-cifar10-32x32-cond-vp.pkl", device=device)
     if resume_from_checkpoint:
@@ -224,13 +192,17 @@ def run(
     generator_loss = GeneratorLoss(timesteps=dmd_loss_timesteps, lambda_reg=dmd_loss_lambda)
     diffusion_loss = DenoisingLoss()
 
+    # Prepare for distributed training
+    generator, mu_fake, mu_real, generator_optimizer, diffuser_optimizer, train_loader, test_loader = accelerator.prepare(
+        generator, mu_fake, mu_real, generator_optimizer, diffuser_optimizer, train_loader, test_loader
+    )
+
     checkpoint_handler = CheckpointHandler(
         checkpoint_dir=output_dir, lower_is_better=True
-    )  # hardcoded lower_is_better for experimentation
+    )
 
     neptune_run = None
-    if log_neptune:
-        # create neptune run
+    if log_neptune and accelerator.is_main_process:
         neptune_run = create_experiment(NEPTUNE_CONFIG_PATH, run_id=neptune_run_id)
         neptune_run["training_args"] = {
             "model_path": model_path,
@@ -245,7 +217,6 @@ def run(
             "dmd_loss_lambda": float(dmd_loss_lambda),
             "device": str(device),
             "cudnn_benchmark": cudnn_benchmark,
-            "amp_autocast": amp_autocast,
             "max_norm": max_norm,
             "print_steps": print_steps,
             "im_save_steps": im_save_steps,
@@ -267,12 +238,12 @@ def run(
         epochs=epochs,
         neptune_run=neptune_run,
         cudnn_benchmark=cudnn_benchmark,
-        amp_autocast=amp_autocast,
         max_norm=max_norm,
         print_freq=print_steps,
         im_save_freq=im_save_steps,
         checkpoint_handler=checkpoint_handler,
+        accelerator=accelerator,
     )
 
-    if neptune_run:
+    if neptune_run and accelerator.is_main_process:
         neptune_run.stop()
