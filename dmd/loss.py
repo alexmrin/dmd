@@ -61,7 +61,7 @@ class GeneratorLoss(_Loss):
     ) -> torch.Tensor:
         loss_kl = self.dmd_loss(mu_real, mu_fake, x, class_ids)
 
-        if x_ref and y_ref is not None:
+        if x_ref is not None and y_ref is not None:
             # Apply preprocessing
             x_ref = (x_ref + 1) / 2.0
             y_ref = (y_ref + 1) / 2.0
